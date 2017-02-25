@@ -22,6 +22,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
 #ifndef _WIN32
 #include <unistd.h>
 #else
@@ -42,6 +47,7 @@
 static int do_exit = 0;
 static uint32_t bytes_to_read = 0;
 static rtlsdr_dev_t *dev = NULL;
+static pthread_t socket_freq;
 
 void usage(void)
 {
@@ -54,6 +60,7 @@ void usage(void)
 		"\t[-p ppm_error (default: 0)]\n"
 		"\t[-b output_block_size (default: 16 * 16384)]\n"
 		"\t[-n number of samples to read (default: 0, infinite)]\n"
+		"\t[-c port for remote control (default: disabled)]\n"
 		"\t[-S force sync output (default: async)]\n"
 		"\tfilename (a '-' dumps samples to stdout)\n\n");
 	exit(1);
@@ -102,6 +109,60 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 	}
 }
 
+static unsigned int chars_to_int(unsigned char* buf) {
+
+	int i;
+	unsigned int val = 0;
+
+	for(i=1; i<5; i++) {
+		val = val | ((buf[i]) << ((i-1)*8));
+	}
+
+	return val;
+}
+
+static void *socket_thread_fn(void *arg) {
+	int port = *(uint32_t*)(arg);
+	int r, n;
+	int sockfd, newsockfd, portno;
+	socklen_t clilen;
+	unsigned char buffer[5];
+	struct sockaddr_in serv_addr, cli_addr;
+
+	sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+
+	if (sockfd < 0) {
+		perror("ERROR opening socket");
+	}
+
+	bzero((char *) &serv_addr, sizeof(serv_addr));
+
+	serv_addr.sin_family = AF_INET;
+	serv_addr.sin_addr.s_addr = INADDR_ANY;
+	serv_addr.sin_port = htons(port);
+
+	if (bind(sockfd, (struct sockaddr *)&serv_addr,  sizeof(serv_addr)) < 0) {
+		perror("ERROR on binding");
+	}
+
+	bzero(buffer, 5);
+
+	fprintf (stderr, "Main socket started! Tuning enabled on UDP/%d \n", port);
+
+	int new_freq, demod_type, new_squelch, new_gain, agc_mode;
+
+	while((n = read(sockfd, buffer, 5)) != 0) {
+		if(buffer[0] == 0) {
+			new_freq = chars_to_int(buffer);
+			verbose_set_frequency(dev, new_freq);
+			fprintf (stderr, "Remote: Tuning to: %d [Hz]\n", new_freq);
+		}
+	}
+
+	close(sockfd);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 #ifndef _WIN32
@@ -120,8 +181,9 @@ int main(int argc, char **argv)
 	uint32_t frequency = 100000000;
 	uint32_t samp_rate = DEFAULT_SAMPLE_RATE;
 	uint32_t out_block_size = DEFAULT_BUF_LENGTH;
+	uint32_t remote_port = 990;
 
-	while ((opt = getopt(argc, argv, "d:f:g:s:b:n:p:S")) != -1) {
+	while ((opt = getopt(argc, argv, "d:f:g:s:b:n:p:S:c:")) != -1) {
 		switch (opt) {
 		case 'd':
 			dev_index = verbose_device_search(optarg);
@@ -147,6 +209,10 @@ int main(int argc, char **argv)
 			break;
 		case 'S':
 			sync_mode = 1;
+			break;
+		case 'c':
+			remote_port = (uint32_t)atofs(optarg);
+			//fprintf(stderr, "remote is %s\n", optarg);
 			break;
 		default:
 			usage();
@@ -229,6 +295,11 @@ int main(int argc, char **argv)
 
 	/* Reset endpoint before we start reading from it (mandatory) */
 	verbose_reset_buffer(dev);
+
+	if (remote_port) {
+		fprintf(stderr, "Start remote control at port: %u\n", remote_port);
+		pthread_create(&socket_freq, NULL, socket_thread_fn, (void *)(&remote_port));
+	}
 
 	if (sync_mode) {
 		fprintf(stderr, "Reading samples in sync mode...\n");

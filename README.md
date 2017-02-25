@@ -1,3 +1,5 @@
+rtl_sdr with remote frequency change without restart
+
 rtl-sdr
 turns your Realtek RTL2832 based DVB dongle into a SDR receiver
 ======================================================================
